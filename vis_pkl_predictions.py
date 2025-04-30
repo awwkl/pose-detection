@@ -4,7 +4,7 @@ import pickle
 import random
 import numpy as np
 
-from create_csv_from_pkl import check_if_first_bbox_inside_second, compute_iou_of_bboxes, compute_percent_of_bbox_inside_other_bbox, detect_if_body_part_in_image, get_average_scores_per_body_part, get_bounding_boxes_per_body_part, get_valid_person_bbox_bool_list
+from create_csv_from_pkl import check_if_first_bbox_inside_second, compute_iou_of_bboxes, compute_percent_of_bbox_inside_other_bbox, detect_if_body_part_in_image, extract_list_of_metadata_dicts_from_pkl, get_average_scores_per_body_part, get_bounding_boxes_per_body_part, get_valid_person_bbox_bool_list
 
 from tqdm import tqdm
 import time
@@ -75,39 +75,25 @@ for frame_path in tqdm(frames_list):
     frame_orig = cv2.imread(frame_path)
     vis_frame = frame_orig.copy()
     
-    pkl_dict = pickle.load(open(pkl_path, 'rb'))
-    pose_dict = pkl_dict['pose_dict']
-    person_bbox_list = pkl_dict['person_detection_dict']['person_bboxes']
-    
-    valid_person_bbox_bool_list = get_valid_person_bbox_bool_list(person_bbox_list)
-    
-    for i, per_person_pose_dict in pose_dict.items():
-        if not valid_person_bbox_bool_list[i]:
+    metadata_list = extract_list_of_metadata_dicts_from_pkl(pkl_path)
+        
+    for i, person_detection_dict in enumerate(metadata_list):
+        if person_detection_dict['person_detected'] == 0:
             continue
-        keypoint_scores = per_person_pose_dict['keypoint_scores']
-        keypoints = per_person_pose_dict['keypoints']
+        body_in_image = person_detection_dict['body_in_image']
+        face_in_image = person_detection_dict['face_in_image']
+        left_hand_in_image = person_detection_dict['left_hand_in_image']
+        right_hand_in_image = person_detection_dict['right_hand_in_image']
+        left_foot_in_image = person_detection_dict['left_foot_in_image']
+        right_foot_in_image = person_detection_dict['right_foot_in_image']
         
-        body_in_image, face_in_image, left_hand_in_image, right_hand_in_image, left_foot_in_image, right_foot_in_image = detect_if_body_part_in_image(keypoint_scores)
-        
-        average_scores_per_body_part = get_average_scores_per_body_part(keypoint_scores)
-        
-        bounding_boxes_per_body_part, _ = get_bounding_boxes_per_body_part(keypoints, keypoint_scores)
-        face_bounding_box_xyxy = bounding_boxes_per_body_part['face']
-        left_hand_bounding_box_xyxy = bounding_boxes_per_body_part['left_hand']
-        right_hand_bounding_box_xyxy = bounding_boxes_per_body_part['right_hand']
-        body_bounding_box_xyxy = bounding_boxes_per_body_part['body']
-        left_foot_bounding_box_xyxy = bounding_boxes_per_body_part['left_foot']
-        right_foot_bounding_box_xyxy = bounding_boxes_per_body_part['right_foot']
-        
-        if left_hand_in_image and right_hand_in_image:
-            iou_hands = compute_iou_of_bboxes(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy)
-            percent_bbox_left_hand_inside_right_hand = compute_percent_of_bbox_inside_other_bbox(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy)
-            percent_bbox_right_hand_inside_left_hand = compute_percent_of_bbox_inside_other_bbox(right_hand_bounding_box_xyxy, left_hand_bounding_box_xyxy)
-            is_one_bbox_inside_another = check_if_first_bbox_inside_second(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy) \
-                                    or check_if_first_bbox_inside_second(right_hand_bounding_box_xyxy, left_hand_bounding_box_xyxy)
-            if iou_hands > 0.3 or is_one_bbox_inside_another or percent_bbox_left_hand_inside_right_hand > 0.5 or percent_bbox_right_hand_inside_left_hand > 0.5:
-                left_hand_in_image = average_scores_per_body_part['left_hand'] >= average_scores_per_body_part['right_hand']
-                right_hand_in_image = average_scores_per_body_part['right_hand'] > average_scores_per_body_part['left_hand']
+        face_bounding_box_xyxy = person_detection_dict['face_bounding_box_xyxy']
+        left_hand_bounding_box_xyxy = person_detection_dict['left_hand_bounding_box_xyxy']
+        right_hand_bounding_box_xyxy = person_detection_dict['right_hand_bounding_box_xyxy']
+        body_bounding_box_xyxy = person_detection_dict['body_bounding_box_xyxy']
+        left_foot_bounding_box_xyxy = person_detection_dict['left_foot_bounding_box_xyxy']
+        right_foot_bounding_box_xyxy = person_detection_dict['right_foot_bounding_box_xyxy']
+        person_bbox_xyxy = person_detection_dict['person_bounding_box_xyxy']
         
         draw_bbox(vis_frame, face_bounding_box_xyxy, body_part_colors['face'], 'Face', face_in_image)
         draw_bbox(vis_frame, left_hand_bounding_box_xyxy, body_part_colors['left_hand'], 'Hands', left_hand_in_image)
@@ -115,9 +101,6 @@ for frame_path in tqdm(frames_list):
         # draw_bbox(vis_frame, body_bounding_box_xyxy, body_part_colors['body'], 'Body', body_in_image)
         draw_bbox(vis_frame, left_foot_bounding_box_xyxy, body_part_colors['left_foot'], 'Feet', left_foot_in_image)
         draw_bbox(vis_frame, right_foot_bounding_box_xyxy, body_part_colors['right_foot'], 'Feet', right_foot_in_image)
-        
-        # Person bbpx
-        person_bbox_xyxy = person_bbox_list[i]
         draw_bbox(vis_frame, person_bbox_xyxy, body_part_colors['person'], 'Person', True)
 
         add_legend(vis_frame)

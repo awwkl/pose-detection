@@ -12,9 +12,9 @@ from datetime import timedelta
 # TODO: I made changes to the detection algorithm in `vis_pkl_predictions.py`. 
 # I need to port relevant changes over to make them ~consistent.
 
-debug = True
+debug = False
 out_vis_dir = '/ccn2/dataset/babyview/outputs_20250312/pose/4M_frames_old'
-output_csv_path = '/ccn2/dataset/babyview/outputs_20250312/pose/4M_frames_old/test_4M_with_NA_and_bbox.csv'
+output_csv_path = '/ccn2/dataset/babyview/outputs_20250312/pose/4M_frames_old/4M_with_NA_bbox_limbs.csv'
 num_processes = 16
 threshold_used_for_presence_of_body_part = 0.5
 threshold_used_to_calc_bounding_box = 0.2
@@ -140,7 +140,7 @@ def get_bounding_boxes_per_body_part(keypoints, keypoint_scores):
         bounding_box = [x_min, y_min, x_max, y_max]
         body_part_bounding_boxes[body_part] = bounding_box
         
-        body_part_bbox_size = abs((y_max - y_min) * (x_max - x_min))
+        body_part_bbox_size = int(abs((y_max - y_min) * (x_max - x_min)))
         body_part_bbox_sizes[body_part] = body_part_bbox_size
     return body_part_bounding_boxes, body_part_bbox_sizes
 
@@ -156,98 +156,123 @@ def detect_if_body_part_in_image(keypoint_scores):
     
     return body_in_image, face_in_image, left_hand_in_image, right_hand_in_image, left_foot_in_image, right_foot_in_image
     
+def extract_list_of_metadata_dicts_from_pkl(pkl_path):
+    ret_dict_list = []
+    with open(pkl_path, 'rb') as f:
+        video_hashid = os.path.basename(os.path.dirname(pkl_path)).replace('_processed', '')
+        second_in_video = int(os.path.basename(pkl_path).replace('.pkl', ''))
+        time_in_extended_iso = str(datetime.timedelta(seconds=second_in_video))
+        
+        pkl_dict = pickle.load(f)
+        pose_dict = pkl_dict['pose_dict']
+        
+        person_bbox_list = pkl_dict['person_detection_dict']['person_bboxes']
+        person_bbox_conf_list = pkl_dict['person_detection_dict']['person_confs']
+        
+        valid_person_bbox_bool_list = get_valid_person_bbox_bool_list(person_bbox_list)
+        
+        if len(pose_dict) == 0:
+            # Create a blank entry where everything except superseded_gcp_name_feb25 and time_in_extended_iso is None
+            return [{
+                'superseded_gcp_name_feb25': video_hashid, 'time_in_extended_iso': time_in_extended_iso,
+                'person_detected': 0,
+            }]
+        
+        for i, per_person_pose_dict in pose_dict.items():
+            if not valid_person_bbox_bool_list[i]:
+                continue
+            keypoint_scores = per_person_pose_dict['keypoint_scores']
+            keypoints = per_person_pose_dict['keypoints']
+
+            person_bbox = [int(n) for n in person_bbox_list[i]]
+            # person_bbox_size = int(abs((person_bbox[2] - person_bbox[0]) * (person_bbox[3] - person_bbox[1])))
+            person_bbox_conf = np.round(person_bbox_conf_list[i].cpu().numpy(), 2)
+
+            body_in_image, face_in_image, left_hand_in_image, right_hand_in_image, left_foot_in_image, right_foot_in_image = detect_if_body_part_in_image(keypoint_scores)
+            average_scores_per_body_part = get_average_scores_per_body_part(keypoint_scores)
+            bounding_boxes_per_body_part, body_part_bbox_sizes = get_bounding_boxes_per_body_part(keypoints, keypoint_scores)
+            
+            left_hand_bounding_box_xyxy = bounding_boxes_per_body_part['left_hand']
+            right_hand_bounding_box_xyxy = bounding_boxes_per_body_part['right_hand']
+            
+            if left_hand_in_image and right_hand_in_image:
+                iou_hands = compute_iou_of_bboxes(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy)
+                percent_bbox_left_hand_inside_right_hand = compute_percent_of_bbox_inside_other_bbox(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy)
+                percent_bbox_right_hand_inside_left_hand = compute_percent_of_bbox_inside_other_bbox(right_hand_bounding_box_xyxy, left_hand_bounding_box_xyxy)
+                is_one_bbox_inside_another = check_if_first_bbox_inside_second(left_hand_bounding_box_xyxy, right_hand_bounding_box_xyxy) \
+                                        or check_if_first_bbox_inside_second(right_hand_bounding_box_xyxy, left_hand_bounding_box_xyxy)
+                if iou_hands > 0.3 or is_one_bbox_inside_another or percent_bbox_left_hand_inside_right_hand > 0.5 or percent_bbox_right_hand_inside_left_hand > 0.5:
+                    left_hand_in_image = int(average_scores_per_body_part['left_hand'] >= average_scores_per_body_part['right_hand'])
+                    right_hand_in_image = int(average_scores_per_body_part['right_hand'] > average_scores_per_body_part['left_hand'])
+        
+            # append to the dataframe
+            ret_dict_list.append({
+                'superseded_gcp_name_feb25': video_hashid,
+                'time_in_extended_iso': time_in_extended_iso,
+                'person_detected': 1,
+                'person_bounding_box_xyxy': person_bbox, 
+                'person_bbox_conf': person_bbox_conf,
+                'body_score': average_scores_per_body_part['body'],
+                'face_score': average_scores_per_body_part['face'],
+                'left_hand_score': average_scores_per_body_part['left_hand'],
+                'right_hand_score': average_scores_per_body_part['right_hand'],
+                'left_foot_score': average_scores_per_body_part['left_foot'],
+                'right_foot_score': average_scores_per_body_part['right_foot'],
+                'body_in_image': body_in_image, 'face_in_image': face_in_image,
+                'left_hand_in_image': left_hand_in_image, 'right_hand_in_image': right_hand_in_image,
+                'left_foot_in_image': left_foot_in_image, 'right_foot_in_image': right_foot_in_image,
+                'body_bounding_box_xyxy': bounding_boxes_per_body_part['body'],
+                'face_bounding_box_xyxy': bounding_boxes_per_body_part['face'],
+                'left_hand_bounding_box_xyxy': bounding_boxes_per_body_part['left_hand'],
+                'right_hand_bounding_box_xyxy': bounding_boxes_per_body_part['right_hand'],
+                'left_foot_bounding_box_xyxy': bounding_boxes_per_body_part['left_foot'],
+                'right_foot_bounding_box_xyxy': bounding_boxes_per_body_part['right_foot'],
+                'body_bounding_box_size': body_part_bbox_sizes['body'],
+                'face_bounding_box_size': body_part_bbox_sizes['face'],
+                'left_hand_bounding_box_size': body_part_bbox_sizes['left_hand'],
+                'right_hand_bounding_box_size': body_part_bbox_sizes['right_hand'],
+                'left_foot_bounding_box_size': body_part_bbox_sizes['left_foot'],
+                'right_foot_bounding_box_size': body_part_bbox_sizes['right_foot'],
+            })
+            
+    return ret_dict_list
+    
 # create a pandas dataframe to store the results
 def create_dataframe(vis_pkl_paths):
     df_out = pd.DataFrame(columns=['superseded_gcp_name_feb25', 'time_in_extended_iso', 
-                                   'person_detected', 
-                                   'person_bbox_xyxy', 
-                                   'person_bbox_conf', 'person_bbox_size',
-                                   'body_score', 'face_score', 'hands_score', 'feet_score', 
-                                   'body_in_image', 'face_in_image', 'left_hand_in_image', 'right_hand_in_image', 'left_foot_in_image', 'right_foot_in_image',
-                                   'body_bounding_box_xyxy', 'face_bounding_box_xyxy', 
-                                   'left_hand_bounding_box_xyxy', 'right_hand_bounding_box_xyxy', 
-                                   'left_foot_bounding_box_xyxy', 'right_foot_bounding_box_xyxy',
-                                   'body_bounding_box_size', 'face_bounding_box_size', 
-                                   'left_hand_bounding_box_size', 'right_hand_bounding_box_size',
-                                   'left_foot_bounding_box_size', 'right_foot_bounding_box_size',
+                                    'person_detected', 
+                                    'person_bounding_box_xyxy', 'person_bbox_conf',
+                                    'body_score', 'face_score', 
+                                    'left_hand_score', 'right_hand_score', 'left_foot_score', 'right_foot_score',
+                                    'body_in_image', 'face_in_image', 
+                                    'left_hand_in_image', 'right_hand_in_image',
+                                    'left_foot_in_image', 'right_foot_in_image',
+                                    'body_bounding_box_xyxy', 'face_bounding_box_xyxy', 
+                                    'left_hand_bounding_box_xyxy', 'right_hand_bounding_box_xyxy', 
+                                    'left_foot_bounding_box_xyxy', 'right_foot_bounding_box_xyxy',
+                                    'body_bounding_box_size', 'face_bounding_box_size',
+                                    'left_hand_bounding_box_size', 'right_hand_bounding_box_size',
+                                    'left_foot_bounding_box_size', 'right_foot_bounding_box_size'
                                    ], index=None)
 
     for i, pkl_path in enumerate(tqdm(vis_pkl_paths, desc="Processing PKL files")):
-        with open(pkl_path, 'rb') as f:
-            video_hashid = os.path.basename(os.path.dirname(pkl_path)).replace('_processed', '')
-            second_in_video = int(os.path.basename(pkl_path).replace('.pkl', ''))
-            time_in_extended_iso = str(datetime.timedelta(seconds=second_in_video))
-            
-            pkl_dict = pickle.load(f)
-            pose_dict = pkl_dict['pose_dict']
-            
-            person_bbox_list = pkl_dict['person_detection_dict']['person_bboxes']
-            person_bbox_conf_list = pkl_dict['person_detection_dict']['person_confs']
-            
-            if len(pose_dict) == 0:
-                # Create a blank entry where everything except superseded_gcp_name_feb25 and time_in_extended_iso is None
-                df_out.loc[len(df_out)] = {
-                    'superseded_gcp_name_feb25': video_hashid, 'time_in_extended_iso': time_in_extended_iso,
-                    'person_detected': 0,
-                }
-                continue
-            
-            for i, per_person_pose_dict in pose_dict.items():
-                keypoint_scores = per_person_pose_dict['keypoint_scores']
-                average_scores_per_body_part = get_average_scores_per_body_part(keypoint_scores)
-
-                body_in_image, face_in_image, left_hand_in_image, right_hand_in_image, left_foot_in_image, right_foot_in_image = detect_if_body_part_in_image(keypoint_scores)
-
-                keypoints = per_person_pose_dict['keypoints']
-                bounding_boxes_per_body_part, body_part_bbox_sizes = get_bounding_boxes_per_body_part(keypoints, keypoint_scores)
-
-                person_bbox = [int(n) for n in person_bbox_list[i]]
-                person_bbox_size = int(abs((person_bbox[2] - person_bbox[0]) * (person_bbox[3] - person_bbox[1])))
-                person_bbox_conf = np.round(person_bbox_conf_list[i].cpu().numpy(), 2)
-            
-                # append to the dataframe
-                df_out.loc[len(df_out)] = {
-                    'superseded_gcp_name_feb25': video_hashid,
-                    'time_in_extended_iso': time_in_extended_iso,
-                    'person_detected': 1,
-                    'person_bbox_xyxy': person_bbox, 
-                    'person_bbox_conf': person_bbox_conf,
-                    'person_bbox_size': person_bbox_size,
-                    'body_score': average_scores_per_body_part['body'],
-                    'face_score': average_scores_per_body_part['face'],
-                    'hands_score': average_scores_per_body_part['hands'],
-                    'feet_score': average_scores_per_body_part['feet'],
-                    'body_in_image': body_in_image,
-                    'face_in_image': face_in_image,
-                    'left_hand_in_image': left_hand_in_image,
-                    'right_hand_in_image': right_hand_in_image,
-                    'left_foot_in_image': left_foot_in_image,
-                    'right_foot_in_image': right_foot_in_image,
-                    'body_bounding_box_xyxy': bounding_boxes_per_body_part['body'],
-                    'face_bounding_box_xyxy': bounding_boxes_per_body_part['face'],
-                    'left_hand_bounding_box_xyxy': bounding_boxes_per_body_part['left_hand'],
-                    'right_hand_bounding_box_xyxy': bounding_boxes_per_body_part['right_hand'],
-                    'feet_bounding_box_xyxy': bounding_boxes_per_body_part['feet'],
-                    'body_bounding_box_size': body_part_bbox_sizes['body'],
-                    'face_bounding_box_size': body_part_bbox_sizes['face'],
-                    'left_hand_bounding_box_size': body_part_bbox_sizes['left_hand'],
-                    'right_hand_bounding_box_size': body_part_bbox_sizes['right_hand'],
-                    'feet_bounding_box_size': body_part_bbox_sizes['feet'],
-                }
+        metadata_list = extract_list_of_metadata_dicts_from_pkl(pkl_path) # Load the PKL file and extract metadata
+        df = pd.DataFrame(metadata_list) # Create a DataFrame from the metadata list
+        df_out = pd.concat([df_out, df], ignore_index=True) # Append the DataFrame to the output DataFrame
                 
     return df_out
 
 @ray.remote(num_gpus=0.5)
-def create_dataframe_remote(vis_pkl_paths):
+def create_dataframe_remote_babyview_pose(vis_pkl_paths):
     return create_dataframe(vis_pkl_paths)
 
 if __name__ == '__main__':
     vis_pkl_paths = glob.glob(os.path.join(out_vis_dir, '**/*.pkl'), recursive=True)
-    random.shuffle(vis_pkl_paths)
+    random.seed(42); random.shuffle(vis_pkl_paths)
     print('Number of PKL files:', len(vis_pkl_paths))
 
     if debug:
-        vis_pkl_paths = vis_pkl_paths[:100]
+        vis_pkl_paths = vis_pkl_paths[:400000]
         # debug_df = create_dataframe(vis_pkl_paths)
         # debug_df.to_csv(output_csv_path, index=False)
         # exit()
@@ -259,7 +284,7 @@ if __name__ == '__main__':
     chunks = np.array_split(vis_pkl_paths, num_chunks)
 
     # Process each chunk in parallel
-    dataframes = ray.get([create_dataframe_remote.remote(chunk) for chunk in chunks])
+    dataframes = ray.get([create_dataframe_remote_babyview_pose.remote(chunk) for chunk in chunks])
 
 
     # Combine all dataframes into a single dataframe
